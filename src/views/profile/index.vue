@@ -496,9 +496,9 @@
                   size="small"
                 >
                   <template slot="exchange_id" slot-scope="text, record">
-                    <span style="text-transform: capitalize; font-weight: 500;">{{ getExchangeDisplayName(text) }}</span>
+                    <span v-if="record" style="text-transform: capitalize; font-weight: 500;">{{ getExchangeDisplayName(text) }}</span>
                     <a-tag
-                      v-if="record.enable_demo_trading"
+                      v-if="record && record.enable_demo_trading"
                       color="orange"
                       size="small"
                       style="margin-left: 6px;"
@@ -506,8 +506,72 @@
                       {{ $t('profile.exchange.demoTag') }}
                     </a-tag>
                   </template>
+                  <template slot="api_key" slot-scope="text, record">
+                    <div v-if="record" style="display: flex; align-items: center; gap: 8px;">
+                      <span v-if="text" style="font-family: monospace; font-size: 12px; max-width: 150px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">
+                        {{ text }}
+                      </span>
+                      <span v-else style="color: #999; font-size: 12px;">未设置</span>
+                      <a-tooltip :title="'点击复制'">
+                        <a-icon
+                          v-if="text"
+                          type="copy"
+                          style="color: #1890ff; cursor: pointer;"
+                          @click="copyApiKey(record)"
+                        />
+                      </a-tooltip>
+                      <a-button
+                        v-if="!text"
+                        type="link"
+                        size="small"
+                        icon="key"
+                        @click="handleGetApiKey(record)"
+                        style="padding: 0;"
+                      >
+                        生成
+                      </a-button>
+                    </div>
+                  </template>
                   <template slot="api_key_hint" slot-scope="text, record">
-                    <span class="credential-hint">{{ text || record.name || '-' }}</span>
+                    <a-tooltip :title="'点击复制'">
+                      <span
+                        class="credential-hint clickable"
+                        @click="copyCredentialInfo(record)"
+                        style="cursor: pointer;"
+                      >
+                        {{ text || record.name || '-' }}
+                        <a-icon type="copy" style="margin-left: 4px; color: #1890ff;" />
+                      </span>
+                    </a-tooltip>
+                  </template>
+                  <template #localClient="{ record }">
+                    <div v-if="record && isLocalBroker(record.exchange_id)">
+                      <!-- WebSocket状态 -->
+                      <a-badge
+                        :status="wsConnected ? 'success' : 'default'"
+                        :text="wsConnected ? '已连接' : '未连接'"
+                      />
+
+                      <!-- 操作按钮 -->
+                      <a-space style="margin-top: 8px">
+                        <a-button
+                          size="small"
+                          type="primary"
+                          icon="key"
+                          @click="handleGetApiKey(record)"
+                        >
+                          获取Key
+                        </a-button>
+                        <a-button
+                          size="small"
+                          icon="download"
+                          @click="handleDownloadClient"
+                        >
+                          下载客户端
+                        </a-button>
+                      </a-space>
+                    </div>
+                    <span v-else>-</span>
                   </template>
                   <template slot="created_at" slot-scope="text">
                     {{ formatTime(text) }}
@@ -567,6 +631,8 @@
       @success="loadExchangeCredentials"
     />
 
+    <ApiKeyModal ref="apiKeyModal" @close="onApiKeyModalClose" />
+
     <a-modal
       :title="$t('profile.exchange.openAccountTitle')"
       :visible="showExchangeSignupModal"
@@ -609,16 +675,17 @@
 </template>
 
 <script>
-import { getProfile, updateProfile, getMyCreditsLog, getMyReferrals, getNotificationSettings, updateNotificationSettings, testNotificationSettings } from '@/api/user'
+import { getProfile, updateProfile, getMyCreditsLog, getMyReferrals, getNotificationSettings, updateNotificationSettings, testNotificationSettings, createApiKey, getClientStatus } from '@/api/user'
 import { getSettingsValues } from '@/api/settings'
 import { listExchangeCredentials, deleteExchangeCredential } from '@/api/credentials'
 import { baseMixin } from '@/store/app-mixin'
 import ExchangeAccountModal from '@/components/ExchangeAccountModal/ExchangeAccountModal.vue'
+import ApiKeyModal from '@/components/ApiKeyModal.vue'
 import { formatBrowserLocalDateTime } from '@/utils/userTime'
 
 export default {
   name: 'Profile',
-  components: { ExchangeAccountModal },
+  components: { ExchangeAccountModal, ApiKeyModal },
   mixins: [baseMixin],
   data () {
     return {
@@ -710,6 +777,10 @@ export default {
       exchangeLoading: false,
       showAddExchangeModal: false,
       showExchangeSignupModal: false,
+      // WebSocket client status
+      wsConnected: false,
+      wsClients: [],
+      wsStatusTimer: null,
       exchangeSignupCards: [
         {
           id: 'binance',
@@ -842,6 +913,17 @@ export default {
           customRender: (text) => text || '-'
         },
         {
+          title: '本地客户端',
+          key: 'localClient',
+          width: 220,
+          scopedSlots: { customRender: 'localClient' }
+        },
+        {
+          title: 'API Key',
+          dataIndex: 'api_key',
+          scopedSlots: { customRender: 'api_key' }
+        },
+        {
           title: this.$t('profile.exchange.colHint') || 'Connection Info',
           dataIndex: 'api_key_hint',
           scopedSlots: { customRender: 'api_key_hint' }
@@ -884,10 +966,18 @@ export default {
   mounted () {
     this.loadProfile()
     this.loadReferrals()
+    // 启动WebSocket状态轮询
+    this.fetchWsStatus()
+    this.wsStatusTimer = setInterval(() => {
+      this.fetchWsStatus()
+    }, 10000) // 每10秒刷新一次
   },
   beforeDestroy () {
     if (this.pwdCodeTimer) {
       clearInterval(this.pwdCodeTimer)
+    }
+    if (this.wsStatusTimer) {
+      clearInterval(this.wsStatusTimer)
     }
   },
   methods: {
@@ -1226,18 +1316,29 @@ export default {
 
     // Exchange credential methods
     async loadExchangeCredentials () {
-      this.exchangeLoading = true
-      try {
-        const res = await listExchangeCredentials()
-        if (res.code === 1 && res.data) {
-          this.exchangeCredentials = res.data.items || []
-        }
-      } catch (e) {
-        this.$message.error('Failed to load exchange accounts')
-      } finally {
-        this.exchangeLoading = false
+    this.exchangeLoading = true
+    try {
+      const res = await listExchangeCredentials()
+      console.log('=== API返回数据 ===')
+      console.log('完整响应:', res)
+      console.log('res.code:', res.code)
+      console.log('res.data:', res.data)
+      if (res.code === 1 && res.data) {
+        // 尝试多种可能的数据结构
+        const items = res.data.items || res.data.list || res.data || []
+        console.log('解析后的数据:', items)
+        this.exchangeCredentials = items
+      } else {
+        console.error('API返回code不是1:', res.code)
+        console.error('完整响应:', res)
       }
-    },
+    } catch (e) {
+      console.error('加载交易所凭证失败:', e)
+      this.$message.error('Failed to load exchange accounts')
+    } finally {
+      this.exchangeLoading = false
+    }
+  },
 
     openAddExchangeModal () {
       this.showAddExchangeModal = true
@@ -1287,6 +1388,106 @@ export default {
       } catch (e) {
         this.$message.error('Delete failed')
       }
+    },
+
+    copyCredentialInfo (record) {
+      const info = record.api_key_hint || record.name || ''
+      if (!info) return
+
+      if (navigator.clipboard) {
+        navigator.clipboard.writeText(info).then(() => {
+          this.$message.success(this.$t('common.copySuccess') || '已复制到剪贴板')
+        }).catch(() => {
+          this.fallbackCopy(info)
+        })
+      } else {
+        this.fallbackCopy(info)
+      }
+    },
+
+    copyApiKey (record) {
+      // 使用完整的API Key（api_key_full），如果没有则使用脱敏版本
+      const key = record.api_key_full || record.api_key || ''
+      if (!key) {
+        this.$message.warning('暂无可用的API Key，请先生成')
+        return
+      }
+
+      // 安全地检查clipboard API
+      if (navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
+        navigator.clipboard.writeText(key).then(() => {
+          this.$message.success(this.$t('common.copySuccess') || '已复制到剪贴板')
+        }).catch((err) => {
+          console.warn('Clipboard API failed, using fallback:', err)
+          this.fallbackCopy(key)
+        })
+      } else {
+        // 降级到传统复制方法
+        console.log('Clipboard API not available, using fallback')
+        this.fallbackCopy(key)
+      }
+    },
+
+    // Local client methods
+    isLocalBroker (exchangeId) {
+      const id = (exchangeId || '').toLowerCase()
+      return ['mt5', 'ibkr'].includes(id) || id.includes('metatrader') || id.includes('interactive')
+    },
+
+    hasApiKey (record) {
+      // 检查该交易所凭证是否有关联的API Key
+      // 这里可以后续扩展为调用后端API查询
+      return false
+    },
+
+    async handleGetApiKey (record) {
+      // 为任何交易所凭证生成API Key
+      try {
+        const response = await createApiKey({
+          key_name: `${record.exchange_id || 'local'}-${Date.now()}`,
+          description: `用于${record.name || '交易'}`,
+          expires_days: 365,
+          credential_id: record.id // 关联到具体的交易所凭证
+        })
+
+        if (response.code === 1 && response.data && response.data.api_key) {
+          this.$refs.apiKeyModal.show(response.data.api_key)
+          this.$message.success('API Key创建成功')
+          // 刷新交易所凭证列表，以显示新创建的 API Key
+          this.loadExchangeCredentials()
+        } else {
+          this.$message.error(response.msg || '创建失败')
+        }
+      } catch (error) {
+        console.error('创建API Key失败:', error)
+        const errorMsg = error.response?.data?.msg || error.message || '网络错误，请稍后重试'
+        this.$message.error(errorMsg)
+      }
+    },
+
+    handleDownloadClient () {
+      // 下载本地客户端
+      // TODO: 替换为实际的下载地址
+      const downloadUrl = '/downloads/quantdinger-local-client.zip'
+      window.open(downloadUrl, '_blank')
+      this.$message.info('正在下载QuantDinger本地客户端...')
+    },
+
+    async fetchWsStatus () {
+      try {
+        const response = await getClientStatus()
+        if (response.data.code === 1) {
+          this.wsConnected = response.data.data.clients.length > 0
+          this.wsClients = response.data.data.clients
+        }
+      } catch (error) {
+        console.error('获取WebSocket状态失败', error)
+      }
+    },
+
+    onApiKeyModalClose () {
+      // API Key弹窗关闭后的处理
+      // 可以在这里刷新状态或执行其他操作
     },
 
     // Notification settings methods
@@ -1901,6 +2102,28 @@ export default {
       font-family: 'SFMono-Regular', Consolas, monospace;
       font-size: 13px;
       color: #666;
+    }
+
+    .credential-hint-wrapper {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+
+      .copy-icon {
+        font-size: 14px;
+        color: #1890ff;
+        cursor: pointer;
+        transition: all 0.2s;
+
+        &:hover {
+          color: #40a9ff;
+          transform: scale(1.1);
+        }
+
+        &:active {
+          transform: scale(0.95);
+        }
+      }
     }
   }
 

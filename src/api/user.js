@@ -291,3 +291,62 @@ export function getAdminAiStats (params) {
     params
   })
 }
+
+// ==================== API Key Management ====================
+
+/**
+ * Create API Key
+ * @param {Object} data - { key_name, description, expires_days }
+ */
+export function createApiKey (data) {
+  return request({
+    url: '/api/users/api-key/create',
+    method: 'post',
+    data
+  })
+}
+
+/**
+ * Get API Key list
+ */
+export function getApiKeyList () {
+  return request({
+    url: '/api/users/api-key/list',
+    method: 'get'
+  })
+}
+
+/**
+ * Revoke API Key
+ * @param {Number} keyId - API Key ID
+ */
+export function revokeApiKey (keyId) {
+  return request({
+    url: '/api/users/api-key/revoke',
+    method: 'post',
+    data: { key_id: keyId }
+  })
+}
+
+/**
+ * Delete API Key
+ * @param {Number} keyId - API Key ID
+ */
+export function deleteApiKey (keyId) {
+  return request({
+    url: `/api/users/api-key/${keyId}`,
+    method: 'delete'
+  })
+}
+
+// ==================== WebSocket Client Status ====================
+
+/**
+ * Get WebSocket client connection status
+ */
+export function getClientStatus () {
+  return request({
+    url: '/api/websocket/client-status',
+    method: 'get'
+  })
+}

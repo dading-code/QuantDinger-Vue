@@ -1,9 +1,5 @@
 const path = require('path')
-// Vue CLI v5 ships with webpack v5 nested under @vue/cli-service.
-// If the project root also has a different webpack version installed/hoisted,
-// requiring "webpack" here may pull in the wrong major version and break hooks.
-// Always bind to Vue CLI's webpack to keep plugin APIs consistent.
-const webpack = require('@vue/cli-service/node_modules/webpack')
+const webpack = require('webpack')
 const packageJson = require('./package.json')
 const GitRevisionPlugin = require('git-revision-webpack-plugin')
 const GitRevision = new GitRevisionPlugin()
@@ -126,11 +122,11 @@ const vueConfig = {
   },
 
   devServer: {
-    // development server port 8000
-    port: 8000,
+    // development server port 8001
+    port: 8001,
     proxy: {
       '/api': {
-        target: 'http://localhost:5000',
+        target: process.env.VUE_APP_API_URL || 'http://39.105.150.99:8888',
         ws: true,
         changeOrigin: true,
         timeout: 600000, // 10 minutes for long-running requests like backtest
